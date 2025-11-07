@@ -402,9 +402,12 @@ tryCatch({
 ## Regression Output with stargazer.
 ##===============##
   
+Path <- file.path(PaperReplication_Charts_Path, "07_Regression_Summary.html")
+  
 stargazer(
   reg_1, 
-    type = "text",
+    type = "html",
+    out = Path,
     title = "Volatility-Managed Portfolio Regression",
     dep.var.labels = "Managed Portfolio Return (Ann. %)",
     covariate.labels = "Market Return (Ann. %)",
