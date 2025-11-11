@@ -23,7 +23,9 @@ Path <- "C:/Users/TristanLeiter/Documents/Privat/ARM2/MoreiraMuir_2017_Replicati
 packages <- c("xts", "here",
               "lubridate",    ## month() function.
               "ggplot2", "dplyr", "quantmod", "patchwork", "fredr",
-              "scales", "stargazer"
+              "scales", "stargazer",
+              "sandwich",    ## For Neway-West adjusted SE.
+              "lmtest"
               )
 
 for(i in 1:length(packages)){
@@ -40,7 +42,7 @@ for(i in 1:length(packages)){
 #==== 1B - Functions ==========================================================#
 
 ## DownloadFRED.
-source("Functions/DownloadFRED.R")
+source("01_Code/Functions/DownloadFRED.R")
 
 ## Nice plot formating.
 theme_nice <- function() {
@@ -61,12 +63,15 @@ system_date <- Sys.Date()
 start_date_train <- "1926"
 end_date_train <- "2015"
 train_period <- paste(start_date_train, "/", end_date_train, sep = "")
+test_period <- paste(start_date_train, "/", "2025-07-31", sep = "")
 
 ## Paths.
 Data_Path <- file.path(Path, "02_Data")
 Charts_Path <- file.path(Path, "03_Charts")
 
 PaperReplication_Charts_Path <- file.path(Charts_Path, "Replication")
+PaperExtension_Charts_Path <- file.path(Charts_Path, "Extension")
+PaperExtensionFactor_Charts_Path <- file.path(Charts_Path, "ExtensionFactor")
 
 
 ### Plot Parameters
@@ -94,6 +99,9 @@ Data <- Data[-nrow(Data),] # Removes the last row. Not relevant for us.
 Date <- as.Date(Data$Date, format = "%Y%m%d")
 Mkt_ret <- xts(Data$Mkt.RF, Date)
 Mkt_ret <- Mkt_ret / 100 ## To have the returns in decimals, not in percent.
+
+Size_ret <- xts(Data$SMB, Date)
+Size_ret <- Size_ret / 100 ## To have the returns in decimals, not in percent.
 
 #==== 02B - Main Computation - Computation Replication ========================#
 
@@ -414,7 +422,7 @@ stargazer(
     header = FALSE, 
     align = TRUE, 
     report = "vctp*", 
-    omit.stat = c("f", "ser", "adj.rsq", "ll"),
+    omit.stat = c("f", "adj.rsq", "ll"),
     notes = "Residual Std. Error corresponds to the RMSE."
   )
   
@@ -424,8 +432,291 @@ stargazer(
 
 
 #==============================================================================#
-#==== 03 - Analysis ===========================================================#
+#==== 03 - Extension of paper results =========================================#
 #==============================================================================#
+
+#==== 03a - Estimation of d-day variance ======================================#
+
+Chart_Path <- PaperExtension_Charts_Path
+
+##======================##
+## Parameters.
+##======================##
+
+id <- 11815352
+D <- as.numeric(substr(as.character(id), 7, 7)) + 
+     as.numeric(substr(as.character(id), 8, 8)) + 10
+
+Mkt_ret_test <- Mkt_ret[test_period]
+Size_ret_test <- Size_ret[test_period]
+lag_NW <- 6
+
+##======================##
+## Functions.
+##======================##
+
+calculate_d_day_variance <- function(daily_returns_window) {
+  
+  D_local <- length(daily_returns_window)
+  mean_return <- mean(daily_returns_window, na.rm = TRUE)
+  sum_sq_dev <- sum((daily_returns_window - mean_return)^2, na.rm = TRUE)
+  sigma_sq_hat <- (D_local / 22) * sum_sq_dev
+  
+  return(sigma_sq_hat)
+}
+
+#==== 03b - VM-Portfolio (Market) =============================================#
+
+##======================##
+## Compute the d-day variance.
+##======================##
+
+realized_variance_monthly <- rollapply(Mkt_ret_test, 
+                                  width = D, 
+                                  FUN = calculate_d_day_variance, 
+                                  align = "right",
+                                  fill = NA)
+
+realized_variance_monthly <- na.omit(realized_variance_monthly)
+eom_indices <- endpoints(realized_variance_monthly, on = "months")
+realized_variance_monthly <- realized_variance_monthly[eom_indices]
+
+colnames(realized_variance_monthly) <- "d_day_variance"
+cat("\n--- D-Day Variance (Monthly) ---\n")
+print(head(realized_variance_monthly))
+
+##===============##
+## Construct the VM-portfolio.
+##===============##
+
+tryCatch({
+  
+  ## Compute the monthly portfolio return.
+  return_monthly <- apply.monthly(Mkt_ret_test, FUN = function(x) prod(1 + x) - 1)
+  
+  ## Set up the data for the VM-portfolio construction.
+  realized_variance_monthly_lagged <- stats::lag(realized_variance_monthly, k = 1)
+  combined_data <- merge(return_monthly, realized_variance_monthly_lagged, join = "inner")
+  colnames(combined_data) <- c("monthly_return", "lagged_variance")
+  
+  managed_return_unscaled <- combined_data$monthly_return / combined_data$lagged_variance
+  
+  ## Compute the constant c.
+  ## We choose c so that the managed portfolio has the same unconditional standard 
+  ## deviation as the buy-and-hold portfolio.
+  
+  sd_original <- sd(combined_data$monthly_return, na.rm = TRUE)
+  sd_unscaled <- sd(managed_return_unscaled, na.rm = TRUE)
+  
+  c <- sd_original / sd_unscaled
+  
+  ## Now scale the managed returns.
+  managed_return_scaled <- c * managed_return_unscaled
+  colnames(managed_return_scaled) <- "managed_return"
+  managed_return_scaled_market <- managed_return_scaled
+  
+}, silent = TRUE)
+
+#==== 03c - VM-Portfolio (Factor) =============================================#
+
+##======================##
+## Compute the d-day variance for the size factor.
+##======================##
+
+realized_variance_monthly <- rollapply(Size_ret_test, 
+                                       width = D, 
+                                       FUN = calculate_d_day_variance, 
+                                       align = "right",
+                                       fill = NA)
+
+realized_variance_monthly <- na.omit(realized_variance_monthly)
+eom_indices <- endpoints(realized_variance_monthly, on = "months")
+realized_variance_monthly <- realized_variance_monthly[eom_indices]
+
+colnames(realized_variance_monthly) <- "d_day_variance"
+cat("\n--- D-Day Variance (Monthly) ---\n")
+print(head(realized_variance_monthly))
+
+##===============##
+## Construct the VM-factor portfolio.
+##===============##
+
+tryCatch({
+  
+  ## Compute the monthly portfolio return.
+  return_monthly <- apply.monthly(Size_ret_test, FUN = function(x) prod(1 + x) - 1)
+  
+  ## Set up the data for the VM-portfolio construction.
+  realized_variance_monthly_lagged <- stats::lag(realized_variance_monthly, k = 1)
+  combined_data <- merge(return_monthly, realized_variance_monthly_lagged, join = "inner")
+  colnames(combined_data) <- c("monthly_return", "lagged_variance")
+  
+  managed_return_unscaled <- combined_data$monthly_return / combined_data$lagged_variance
+  
+  ## Compute the constant c.
+  ## We choose c so that the managed portfolio has the same unconditional standard 
+  ## deviation as the buy-and-hold portfolio.
+  
+  sd_original <- sd(combined_data$monthly_return, na.rm = TRUE)
+  sd_unscaled <- sd(managed_return_unscaled, na.rm = TRUE)
+  
+  c <- sd_original / sd_unscaled
+  
+  ## Now scale the managed returns.
+  managed_return_scaled <- c * managed_return_unscaled
+  colnames(managed_return_scaled) <- "managed_return"
+  managed_return_scaled_factor <- managed_return_scaled
+  
+}, silent = TRUE)
+
+#==============================================================================#
+#==== 04 - Comparison & Performance Analysis ==================================#
+#==============================================================================#
+
+##======================##
+## Functions.
+##======================##
+
+ComputeDrawdowns <- function(R, geometric = TRUE) {
+  
+  if (!is.matrix(R) || !is.numeric(R)) {
+    stop("Input 'R' must be a numeric matrix.")
+  }
+  
+  drawdown_matrix <- apply(R, 2, function(x_col) {
+    if (geometric) {
+      Return.cumulative <- cumprod(1 + x_col)
+    } else {
+      Return.cumulative <- 1 + cumsum(x_col)
+    }
+    
+    maxCumulativeReturn <- cummax(c(1, Return.cumulative))[-1]
+    drawdown <- Return.cumulative / maxCumulativeReturn - 1
+    return(drawdown)
+  })
+  return(drawdown_matrix)
+}
+
+findComputedDrawdowns <- function(drawdown){
+  MaxDrawdown <- -abs(min(drawdown, na.rm = TRUE))
+  return(MaxDrawdown)
+}
+#==== 04a - Data Preparation ==================================================#
+
+return_monthly_market <- apply.monthly(Mkt_ret_test, FUN = function(x) prod(1 + x) - 1)
+return_monthly_factor <- apply.monthly(Size_ret_test, FUN = function(x) prod(1 + x) - 1)
+
+Data_Analysis <- cbind(return_monthly_market, 
+                       return_monthly_factor,
+                       managed_return_scaled_market,
+                       managed_return_scaled_factor)
+Data_Analysis <- na.omit(Data_Analysis) ## Need to remove the first row.
+
+#==== 04b - Compute the performance measures ==================================#
+
+##===============##
+## Sharpe Ratio.
+##===============##
+
+## Time period / annualization.
+Years_passed <- abs(as.numeric(head(index(Data_Analysis), n = 1) -
+                                 tail(index(Data_Analysis), n = 1)) / 365.25)
+Time_Factor <- nrow(Data_Analysis) / Years_passed
+
+## Geometric_Return
+GeoReturn <- apply(as.matrix(Data_Analysis) + 1, MARGIN = 2, FUN = prod)
+GeoReturn_monthly <- GeoReturn^(1 / nrow(Data_Analysis)) - 1
+GeoReturn_annualized <- GeoReturn^(Time_Factor/nrow(Data_Analysis))-1
+
+## Volatility.
+Variance <- apply(as.matrix(Data_Analysis), MARGIN = 2, FUN = var)
+Volatility_monthly <- sqrt(Variance)
+Volatility_annualized <- sqrt(Variance) * sqrt(Time_Factor)
+
+## Geometric Return divided by the Volatility. (In this case Sharpe Ratio bc we work with excess returns).
+SR <-  GeoReturn_monthly / (Volatility_monthly)
+SR_annualized <-  GeoReturn_annualized / (Volatility_annualized)
+
+##===============##
+## Maximum Drawdown.
+##===============##
+
+drawdowns <- ComputeDrawdowns(as.matrix(Data_Analysis))
+MaxDrawdown <- apply(as.matrix(drawdowns), MARGIN = 2, FUN = findComputedDrawdowns)
+
+#==== 04c - Alpha relative to the market ======================================#
+
+##===============##
+## Market.
+##===============##
+
+reg_data <- Data_Analysis[,c(1,2)]
+colnames(reg_data) <- c("Market", "VM")
+
+reg_vm <- lm(VM ~ Market, 
+             data = reg_data, 
+             na.action = na.omit)
+
+summary(reg_vm)
+
+## NW-Adjustment.
+nw_vcov <- NeweyWest(reg_vm, lag = lag_NW, prewhite = FALSE, adjust = TRUE)
+coefs <- coeftest(kyle_model_period_1, vcov. = nw_vcov)
+tidy_results <- broom::tidy(coefs)
+
+alpha <- tidy_results %>% dplyr::filter(term == "(Intercept)") %>% pull(estimate)
+t_stat <- tidy_results %>% dplyr::filter(term == "(Intercept)") %>% pull(statistic)
+model_stats <- broom::glance(kyle_model_period_1) %>%
+  dplyr::rename(
+    f.statistic = statistic, 
+    f.p.value = p.value
+  )
+
+combined_summary <- tidyr::crossing(tidy_results, model_stats)
+combined_summary <- data.frame(combined_summary)
+
+##===============##
+## Factor.
+##===============##
+
+reg_data <- Data_Analysis[,c(3,4)]
+colnames(reg_data) <- c("Market", "VM")
+
+reg_vm_factor <- lm(VM ~ Market, 
+             data = reg_data, 
+             na.action = na.omit)
+
+summary(reg_vm_factor)
+
+#==== 04d - Visualisation =====================================================#
+
+##===============##
+## Factor.
+##===============##
+
+Path <- file.path(PaperReplication_Charts_Path, "07_Regression_Summary.html")
+
+stargazer(
+  reg_1, 
+  type = "html",
+  out = Path,
+  title = "Volatility-Managed Portfolio Regression",
+  dep.var.labels = "Managed Portfolio Return (Ann. %)",
+  covariate.labels = "Market Return (Ann. %)",
+  header = FALSE, 
+  align = TRUE, 
+  report = "vctp*", 
+  omit.stat = c("f", "adj.rsq", "ll"),
+  notes = "Residual Std. Error corresponds to the RMSE."
+)
+
+
+
+
+
+
+
+
 
 
 
