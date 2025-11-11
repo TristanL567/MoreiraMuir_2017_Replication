@@ -13,8 +13,8 @@
 silent=F
 .libPaths()
 
-# Path <- file.path(here::here(""))  ## Uses the here package. Needs to be installed first.
-Path <- "C:/Users/TristanLeiter/Documents/Privat/ARM2/MoreiraMuir_2017_Replication"
+Path <- file.path(here::here(""))  ## Uses the here package. Needs to be installed first.
+# Path <- "C:/Users/TristanLeiter/Documents/Privat/ARM2/MoreiraMuir_2017_Replication"
 
 #==== 1A - Libraries ==========================================================#
 
@@ -100,6 +100,9 @@ Date <- as.Date(Data$Date, format = "%Y%m%d")
 Mkt_ret <- xts(Data$Mkt.RF, Date)
 Mkt_ret <- Mkt_ret / 100 ## To have the returns in decimals, not in percent.
 
+rf_ret <- xts(Data$SMB, Date)
+rf_ret <- rf_ret / 100 ## To have the returns in decimals, not in percent.
+
 Size_ret <- xts(Data$SMB, Date)
 Size_ret <- Size_ret / 100 ## To have the returns in decimals, not in percent.
 
@@ -116,6 +119,7 @@ Size_ret <- Size_ret / 100 ## To have the returns in decimals, not in percent.
 
 ## Data preparation.
 Mkt_ret_train <- Mkt_ret[train_period]
+risk_free_2015 <- rf_ret[train_period]
 
 ##===============##
 ## Compute the monthly volatility.
@@ -153,6 +157,7 @@ for(period in 1:n_Months){
 ## Now implement it with the function in the xts package.
 realized_variance_monthly <- apply.monthly(Mkt_ret_train, FUN = var) ## Realized variance.
 
+## Check if we can use the function. Yes we can do it since none are different.
 any(!realized_variance_monthly_loop == realized_variance_monthly) ## Check whether they align.
 
 ##===============##
@@ -162,7 +167,10 @@ any(!realized_variance_monthly_loop == realized_variance_monthly) ## Check wheth
 tryCatch({
 
 ## Compute the monthly portfolio return.
-return_monthly <- apply.monthly(Mkt_ret_train, FUN = function(x) prod(1 + x) - 1)
+ret_incl_rf <- Mkt_ret_train + risk_free_2015
+return_incl_rf_monthly <- apply.monthly(ret_incl_rf, FUN = function(x) prod(1 + x) - 1)
+return_rf_monthly <- apply.monthly(risk_free_2015, FUN = function(x) prod(1 + x) - 1)
+return_monthly <- return_incl_rf_monthly - return_rf_monthly
 
 ## Set up the data for the VM-portfolio construction.
 realized_variance_monthly_lagged <- stats::lag(realized_variance_monthly, k = 1)
@@ -175,7 +183,7 @@ managed_return_unscaled <- combined_data$monthly_return / combined_data$lagged_v
 ## We choose c so that the managed portfolio has the same unconditional standard 
 ## deviation as the buy-and-hold portfolio.
 
-sd_original <- sd(combined_data$monthly_return, na.rm = TRUE)
+sd_original <- sd(combined_data$monthly_return[-1]) ## To have the same length.
 sd_unscaled <- sd(managed_return_unscaled, na.rm = TRUE)
 
 c <- sd_original / sd_unscaled
@@ -448,6 +456,7 @@ D <- as.numeric(substr(as.character(id), 7, 7)) +
      as.numeric(substr(as.character(id), 8, 8)) + 10
 
 Mkt_ret_test <- Mkt_ret[test_period]
+risk_free_2025 <- rf_ret[test_period]
 Size_ret_test <- Size_ret[test_period]
 lag_NW <- 6
 
@@ -492,7 +501,10 @@ print(head(realized_variance_monthly))
 tryCatch({
   
   ## Compute the monthly portfolio return.
-  return_monthly <- apply.monthly(Mkt_ret_test, FUN = function(x) prod(1 + x) - 1)
+  ret_incl_rf <- Mkt_ret_train + risk_free_2025
+  return_incl_rf_monthly <- apply.monthly(ret_incl_rf, FUN = function(x) prod(1 + x) - 1)
+  return_rf_monthly <- apply.monthly(risk_free_2025, FUN = function(x) prod(1 + x) - 1)
+  return_monthly <- return_incl_rf_monthly - return_rf_monthly
   
   ## Set up the data for the VM-portfolio construction.
   realized_variance_monthly_lagged <- stats::lag(realized_variance_monthly, k = 1)
@@ -505,7 +517,7 @@ tryCatch({
   ## We choose c so that the managed portfolio has the same unconditional standard 
   ## deviation as the buy-and-hold portfolio.
   
-  sd_original <- sd(combined_data$monthly_return, na.rm = TRUE)
+  sd_original <- sd(combined_data$monthly_return[-1]) ## To have the same length.
   sd_unscaled <- sd(managed_return_unscaled, na.rm = TRUE)
   
   c <- sd_original / sd_unscaled
