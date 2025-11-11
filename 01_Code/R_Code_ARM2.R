@@ -100,7 +100,7 @@ Date <- as.Date(Data$Date, format = "%Y%m%d")
 Mkt_ret <- xts(Data$Mkt.RF, Date)
 Mkt_ret <- Mkt_ret / 100 ## To have the returns in decimals, not in percent.
 
-rf_ret <- xts(Data$SMB, Date)
+rf_ret <- xts(Data$RF, Date)
 rf_ret <- rf_ret / 100 ## To have the returns in decimals, not in percent.
 
 Size_ret <- xts(Data$SMB, Date)
@@ -227,7 +227,9 @@ NBER_recessions <- DownloadFRED(Tickers = "USREC",
 Data_Visualisation <- cbind(combined_data, 
                             managed_return_scaled, 
                             NBER_recessions)
-Data_Visualisation <- na.locf(Data_Visualisation, fromLast = TRUE)
+Data_Visualisation$USREC <- stats::lag(Data_Visualisation$USREC, 1)
+# Data_Visualisation <- na.locf(Data_Visualisation, fromLast = FALSE)
+# Data_Visualisation <- na.locf(Data_Visualisation, fromLast = TRUE)
 Data_Visualisation <- Data_Visualisation[as.Date(index(combined_data))]
 
 ## Remove the first row, just a duplicate since we have no data for it due to the scaling.
@@ -480,15 +482,25 @@ calculate_d_day_variance <- function(daily_returns_window) {
 ## Compute the d-day variance.
 ##======================##
 
-realized_variance_monthly <- rollapply(Mkt_ret_test, 
-                                  width = D, 
-                                  FUN = calculate_d_day_variance, 
-                                  align = "right",
-                                  fill = NA)
+realized_variance_daily <- rollapply(Mkt_ret_test, 
+                                     width = D, 
+                                     FUN = calculate_d_day_variance, 
+                                     align = "right",
+                                     fill = NA)
 
-realized_variance_monthly <- na.omit(realized_variance_monthly)
-eom_indices <- endpoints(realized_variance_monthly, on = "months")
-realized_variance_monthly <- realized_variance_monthly[eom_indices]
+date_monthly <- month(as.Date(index(Mkt_ret_test), format="%d/%m/%Y"))
+date_monthly <- diff(date_monthly)
+date_monthly[date_monthly < 0] <- 1
+
+dates <- index(Mkt_ret_test)
+dates <- dates[date_monthly == 1]
+
+last_Date <- as.Date(index(Mkt_ret_test[nrow(Mkt_ret_test),]), format="%d/%m/%Y")
+first_Date <- as.Date(index(Mkt_ret_test[1,]), format="%d/%m/%Y")-1
+dates <- c(first_Date,dates, last_Date)
+###
+
+realized_variance_monthly <- realized_variance_daily[dates]
 
 colnames(realized_variance_monthly) <- "d_day_variance"
 cat("\n--- D-Day Variance (Monthly) ---\n")
@@ -501,7 +513,7 @@ print(head(realized_variance_monthly))
 tryCatch({
   
   ## Compute the monthly portfolio return.
-  ret_incl_rf <- Mkt_ret_train + risk_free_2025
+  ret_incl_rf <- Mkt_ret_test + risk_free_2025
   return_incl_rf_monthly <- apply.monthly(ret_incl_rf, FUN = function(x) prod(1 + x) - 1)
   return_rf_monthly <- apply.monthly(risk_free_2025, FUN = function(x) prod(1 + x) - 1)
   return_monthly <- return_incl_rf_monthly - return_rf_monthly
@@ -542,8 +554,19 @@ realized_variance_monthly <- rollapply(Size_ret_test,
                                        fill = NA)
 
 realized_variance_monthly <- na.omit(realized_variance_monthly)
-eom_indices <- endpoints(realized_variance_monthly, on = "months")
-realized_variance_monthly <- realized_variance_monthly[eom_indices]
+##
+date_monthly <- month(as.Date(index(Size_ret_test), format="%d/%m/%Y"))
+date_monthly <- diff(date_monthly)
+date_monthly[date_monthly < 0] <- 1
+
+dates <- index(Size_ret_test)
+dates <- dates[date_monthly == 1]
+
+last_Date <- as.Date(index(Size_ret_test[nrow(Size_ret_test),]), format="%d/%m/%Y")
+first_Date <- as.Date(index(Size_ret_test[1,]), format="%d/%m/%Y")-1
+dates <- c(first_Date,dates, last_Date)
+
+realized_variance_monthly <- realized_variance_monthly[dates]
 
 colnames(realized_variance_monthly) <- "d_day_variance"
 cat("\n--- D-Day Variance (Monthly) ---\n")
@@ -569,7 +592,7 @@ tryCatch({
   ## We choose c so that the managed portfolio has the same unconditional standard 
   ## deviation as the buy-and-hold portfolio.
   
-  sd_original <- sd(combined_data$monthly_return, na.rm = TRUE)
+  sd_original <- sd(combined_data$monthly_return[-1], na.rm = TRUE)
   sd_unscaled <- sd(managed_return_unscaled, na.rm = TRUE)
   
   c <- sd_original / sd_unscaled
@@ -658,11 +681,13 @@ MaxDrawdown <- apply(as.matrix(drawdowns), MARGIN = 2, FUN = findComputedDrawdow
 
 #==== 04c - Alpha relative to the market ======================================#
 
+## Add regression of SMB, SMB managed to market 
+
 ##===============##
 ## Market.
 ##===============##
 
-reg_data <- Data_Analysis[,c(1,2)]
+reg_data <- Data_Analysis[,c(1,3)]
 colnames(reg_data) <- c("Market", "VM")
 
 reg_vm <- lm(VM ~ Market, 
@@ -671,14 +696,16 @@ reg_vm <- lm(VM ~ Market,
 
 summary(reg_vm)
 
+reg_vm$coefficients * 100 * 12
+
 ## NW-Adjustment.
 nw_vcov <- NeweyWest(reg_vm, lag = lag_NW, prewhite = FALSE, adjust = TRUE)
-coefs <- coeftest(kyle_model_period_1, vcov. = nw_vcov)
+coefs <- coeftest(reg_vm, vcov. = nw_vcov)
 tidy_results <- broom::tidy(coefs)
 
 alpha <- tidy_results %>% dplyr::filter(term == "(Intercept)") %>% pull(estimate)
 t_stat <- tidy_results %>% dplyr::filter(term == "(Intercept)") %>% pull(statistic)
-model_stats <- broom::glance(kyle_model_period_1) %>%
+model_stats <- broom::glance(reg_vm) %>%
   dplyr::rename(
     f.statistic = statistic, 
     f.p.value = p.value
@@ -687,11 +714,15 @@ model_stats <- broom::glance(kyle_model_period_1) %>%
 combined_summary <- tidyr::crossing(tidy_results, model_stats)
 combined_summary <- data.frame(combined_summary)
 
+nw_se <- coefs[, "Std. Error"]
+nw_t  <- coefs[, "t value"]
+nw_p  <- coefs[, "Pr(>|t|)"]
+
 ##===============##
 ## Factor.
 ##===============##
 
-reg_data <- Data_Analysis[,c(3,4)]
+reg_data <- Data_Analysis[,c(2,4)]
 colnames(reg_data) <- c("Market", "VM")
 
 reg_vm_factor <- lm(VM ~ Market, 
@@ -699,32 +730,74 @@ reg_vm_factor <- lm(VM ~ Market,
              na.action = na.omit)
 
 summary(reg_vm_factor)
+reg_vm_factor$coefficients * 100 * 12
+
+
+## NW-Adjustment.
+nw_vcov <- NeweyWest(reg_vm, lag = lag_NW, prewhite = FALSE, adjust = TRUE)
+coefs <- coeftest(reg_vm, vcov. = nw_vcov)
+tidy_results <- broom::tidy(coefs)
+
+alpha <- tidy_results %>% dplyr::filter(term == "(Intercept)") %>% pull(estimate)
+t_stat <- tidy_results %>% dplyr::filter(term == "(Intercept)") %>% pull(statistic)
+model_stats <- broom::glance(reg_vm) %>%
+  dplyr::rename(
+    f.statistic = statistic, 
+    f.p.value = p.value
+  )
+
+combined_summary <- tidyr::crossing(tidy_results, model_stats)
+combined_summary <- data.frame(combined_summary)
+
+nw_se_fac <- coefs[, "Std. Error"]
+nw_t_fac  <- coefs[, "t value"]
+nw_p_fac  <- coefs[, "Pr(>|t|)"]
+
 
 #==== 04d - Visualisation =====================================================#
+
+##===============##
+## Market.
+##===============##
+
+Path <- file.path(PaperExtensionFactor_Charts_Path, "07_Regression_Summary.html")
+
+stargazer(
+  reg_vm,
+  type = "html",
+  out = Path,
+  se = list(nw_se),
+  t  = list(nw_t),
+  p  = list(nw_p),
+  title = "Volatility-Managed Portfolio Regression",
+  dep.var.labels = "Managed Portfolio Return (Ann. %)",
+  covariate.labels = "Market Return (Ann. %)",
+  header = FALSE,
+  align = TRUE,
+  omit.stat = c("f", "adj.rsq", "ll"),
+  notes = paste0("Standard errors are Newey-West robust (lag=", lag_NW, ").")
+)
 
 ##===============##
 ## Factor.
 ##===============##
 
-Path <- file.path(PaperReplication_Charts_Path, "07_Regression_Summary.html")
-
+Path <- file.path(PaperExtensionFactor_Charts_Path, "07b_Regression_Summary_factor.html")
 stargazer(
-  reg_1, 
+  reg_vm_factor,
   type = "html",
   out = Path,
+  se = list(nw_se_fac),
+  t  = list(nw_t_fac),
+  p  = list(nw_p_fac),
   title = "Volatility-Managed Portfolio Regression",
   dep.var.labels = "Managed Portfolio Return (Ann. %)",
   covariate.labels = "Market Return (Ann. %)",
-  header = FALSE, 
-  align = TRUE, 
-  report = "vctp*", 
+  header = FALSE,
+  align = TRUE,
   omit.stat = c("f", "adj.rsq", "ll"),
-  notes = "Residual Std. Error corresponds to the RMSE."
+  notes = paste0("Standard errors are Newey-West robust (lag=", lag_NW, ").")
 )
-
-
-
-
 
 
 
